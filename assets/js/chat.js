@@ -20,6 +20,7 @@ const cancelNewMessageBtn = document.getElementById('cancelNewMessageBtn');
 // State
 let currentUserId = null;
 let currentRecipientId = null;
+let currentRecipientType = null;
 let currentConversationId = null;
 
 // Initialize chat page
@@ -46,16 +47,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupRealtimeUpdates();
 });
 
-// Load recipients (managers)
+// Load recipients (managers and special options)
 async function loadRecipients() {
-    // In a real app, you'd fetch managers/recipients from your database
-    // For demo, we'll use a hardcoded list or fetch from a 'managers' table
-    
-    // Example: Fetch from a 'profiles' table where role is 'manager'
+    // Fetch managers from profiles table
     const { data: managers, error } = await supabaseClient
         .from('profiles')
-        .select('id, full_name')
-        .eq('role', 'manager')
+        .select('id, full_name, email, role')
         .neq('id', currentUserId);
 
     if (error) {
@@ -64,102 +61,251 @@ async function loadRecipients() {
     }
 
     // Populate recipient select
-    recipientSelect.innerHTML = '<option value="">Select a recipient</option>';
+    recipientSelect.innerHTML = `
+        <option value="">Select a recipient</option>
+        <option value="management">Management</option>
+        <option value="company">Company</option>
+    `;
+    
+    // Add individual managers
     managers.forEach(manager => {
-        recipientSelect.innerHTML += `<option value="${manager.id}">${manager.full_name}</option>`;
+        if (manager.role === 'manager') {
+            recipientSelect.innerHTML += `<option value="${manager.id}">${manager.full_name} (Manager)</option>`;
+        }
     });
 }
 
-// Load conversations
-async function loadConversations() {
-    // Get conversations where current user is either sender or recipient
-    const { data: conversations, error } = await supabaseClient
+// Send message (updated to handle special recipients)
+async function sendMessage() {
+    const content = messageInput.value.trim();
+    if (!content || (!currentRecipientId && !currentRecipientType)) return;
+
+    // For special recipients (management/company), we need to handle differently
+    if (currentRecipientType === 'management' || currentRecipientType === 'company') {
+        // Get sender info
+        const { data: sender } = await supabaseClient
+            .from('profiles')
+            .select('full_name, email')
+            .eq('id', currentUserId)
+            .single();
+        
+        // Call edge function to send email
+        const { error: emailError } = await supabaseClient.functions.invoke('send-message-notification', {
+            body: {
+                message: content,
+                recipientType: currentRecipientType,
+                senderName: sender.full_name,
+                senderEmail: sender.email
+            }
+        });
+        
+        if (emailError) {
+            console.error('Error sending notification:', emailError);
+            alert('Message sent but notification failed: ' + emailError.message);
+        } else {
+            // Also save to database for record keeping
+            const { error: dbError } = await supabaseClient
+                .from('messages')
+                .insert({
+                    sender_id: currentUserId,
+                    recipient_type: currentRecipientType,
+                    content: content
+                });
+            
+            if (dbError) {
+                console.error('Error saving message:', dbError);
+            }
+            
+            alert('Message sent to ' + currentRecipientType);
+        }
+    } else {
+        // Regular message to another user
+        const { error } = await supabaseClient
+            .from('messages')
+            .insert({
+                sender_id: currentUserId,
+                recipient_id: currentRecipientId,
+                content: content
+            });
+
+        if (error) {
+            alert('Error sending message: ' + error.message);
+            return;
+        }
+    }
+
+    // Clear input and reload messages
+    messageInput.value = '';
+    if (currentRecipientId) {
+        await loadMessages(currentRecipientId);
+    }
+    await loadConversations();
+}
+
+// Send new message (from modal - updated)
+async function sendNewMessage() {
+    const recipientValue = recipientSelect.value;
+    const content = newMessageContent.value.trim();
+    
+    if (!recipientValue || !content) {
+        alert('Please select a recipient and enter a message');
+        return;
+    }
+
+    // Check if it's a special recipient (management/company) or a user ID
+    if (recipientValue === 'management' || recipientValue === 'company') {
+        // Get sender info
+        const { data: sender } = await supabaseClient
+            .from('profiles')
+            .select('full_name, email')
+            .eq('id', currentUserId)
+            .single();
+        
+        // Call edge function to send email
+        const { error: emailError } = await supabaseClient.functions.invoke('send-message-notification', {
+            body: {
+                message: content,
+                recipientType: recipientValue,
+                senderName: sender.full_name,
+                senderEmail: sender.email
+            }
+        });
+        
+        if (emailError) {
+            console.error('Error sending notification:', emailError);
+            alert('Message sent but notification failed: ' + emailError.message);
+        } else {
+            // Also save to database for record keeping
+            const { error: dbError } = await supabaseClient
+                .from('messages')
+                .insert({
+                    sender_id: currentUserId,
+                    recipient_type: recipientValue,
+                    content: content
+                });
+            
+            if (dbError) {
+                console.error('Error saving message:', dbError);
+            }
+            
+            alert('Message sent to ' + recipientValue);
+        }
+    } else {
+        // Regular message to another user
+        const { error } = await supabaseClient
+            .from('messages')
+            .insert({
+                sender_id: currentUserId,
+                recipient_id: recipientValue,
+                content: content
+            });
+
+        if (error) {
+            alert('Error sending message: ' + error.message);
+            return;
+        }
+        
+        // Open the new conversation
+        await openConversation(recipientValue);
+    }
+
+    // Close modal, clear fields, and reload conversations
+    newMessageModal.classList.add('hidden');
+    recipientSelect.value = '';
+    newMessageContent.value = '';
+    await loadConversations();
+}
+
+// Open conversation (updated to handle special recipients)
+async function openConversation(recipientIdOrType) {
+    // Check if it's a special recipient type
+    if (recipientIdOrType === 'management' || recipientIdOrType === 'company') {
+        currentRecipientId = null;
+        currentRecipientType = recipientIdOrType;
+        
+        // Update header for special recipients
+        messageHeader.innerHTML = `
+            <div class="ml-3 flex-1">
+                <h3 class="text-lg font-medium text-gray-900">${recipientIdOrType.charAt(0).toUpperCase() + recipientIdOrType.slice(1)}</h3>
+                <p class="text-sm text-gray-500">Messages will be sent via email</p>
+            </div>
+        `;
+
+        // Load messages for this special recipient
+        await loadSpecialMessages(recipientIdOrType);
+        
+        // Show message input
+        messageInputContainer.classList.remove('hidden');
+    } else {
+        currentRecipientId = recipientIdOrType;
+        currentRecipientType = null;
+        
+        // Get recipient details
+        const { data: recipient, error } = await supabaseClient
+            .from('profiles')
+            .select('full_name, avatar_url')
+            .eq('id', recipientIdOrType)
+            .single();
+
+        if (error) {
+            console.error('Error loading recipient:', error);
+            return;
+        }
+
+        // Update header
+        messageHeader.innerHTML = `
+            <img class="h-10 w-10 rounded-full" src="${recipient.avatar_url || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(recipient.full_name)}" alt="${recipient.full_name}">
+            <div class="ml-3 flex-1">
+                <h3 class="text-lg font-medium text-gray-900">${recipient.full_name}</h3>
+                <p class="text-sm text-gray-500">Active now</p>
+            </div>
+        `;
+
+        // Load messages
+        await loadMessages(recipientIdOrType);
+        
+        // Show message input
+        messageInputContainer.classList.remove('hidden');
+    }
+}
+
+// Load messages for special recipients
+async function loadSpecialMessages(recipientType) {
+    const { data: messages, error } = await supabaseClient
         .from('messages')
-        .select('recipient_id, recipients:recipient_id(full_name, avatar_url), senders:sender_id(full_name, avatar_url)')
-        .or(`sender_id.eq.${currentUserId},recipient_id.eq.${currentUserId}`)
-        .order('created_at', { ascending: false });
+        .select('*')
+        .eq('sender_id', currentUserId)
+        .eq('recipient_type', recipientType)
+        .order('created_at', { ascending: true });
 
     if (error) {
-        conversationsList.innerHTML = '<div class="p-4 text-center text-red-500">Error loading conversations</div>';
-        console.error('Error loading conversations:', error);
+        messagesContainer.innerHTML = '<div class="text-center text-red-500 py-10">Error loading messages</div>';
+        console.error('Error loading messages:', error);
         return;
     }
 
-    if (conversations.length === 0) {
-        conversationsList.innerHTML = '<div class="p-4 text-center text-gray-500">No conversations yet</div>';
+    if (messages.length === 0) {
+        messagesContainer.innerHTML = '<div class="text-center text-gray-500 py-10">No messages yet</div>';
         return;
     }
 
-    // Process conversations to show unique recipients
-    const uniqueRecipients = {};
-    conversations.forEach(conv => {
-        const otherUserId = conv.sender_id === currentUserId ? conv.recipient_id : conv.sender_id;
-        const otherUser = conv.sender_id === currentUserId ? conv.recipients : conv.senders;
-        
-        if (!uniqueRecipients[otherUserId]) {
-            uniqueRecipients[otherUserId] = {
-                id: otherUserId,
-                name: otherUser.full_name,
-                avatar: otherUser.avatar_url,
-                lastMessage: conv.created_at
-            };
-        }
-    });
-
-    // Sort by last message date
-    const sortedConversations = Object.values(uniqueRecipients).sort((a, b) => 
-        new Date(b.lastMessage) - new Date(a.lastMessage));
-
-    // Display conversations
-    conversationsList.innerHTML = sortedConversations.map(conv => `
-        <div class="p-4 hover:bg-gray-100 cursor-pointer transition flex items-center conversation-item" data-id="${conv.id}">
-            <img class="h-10 w-10 rounded-full" src="${conv.avatar || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(conv.name)}" alt="${conv.name}">
-            <div class="ml-3 flex-1">
-                <h4 class="text-sm font-medium text-gray-900">${conv.name}</h4>
-                <p class="text-sm text-gray-500">Last conversation</p>
+    // Display messages
+    messagesContainer.innerHTML = messages.map(msg => `
+        <div class="mb-4 flex justify-end">
+            <div class="max-w-xs md:max-w-md lg:max-w-lg px-4 py-2 rounded-lg bg-indigo-600 text-white">
+                <p>${msg.content}</p>
+                <p class="text-xs mt-1 text-indigo-200">
+                    ${formatTime(msg.created_at)}
+                </p>
             </div>
         </div>
     `).join('');
 
-    // Add click event to conversation items
-    document.querySelectorAll('.conversation-item').forEach(item => {
-        item.addEventListener('click', () => openConversation(item.dataset.id));
-    });
+    // Scroll to bottom
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
-// Open conversation
-async function openConversation(recipientId) {
-    currentRecipientId = recipientId;
-    
-    // Get recipient details
-    const { data: recipient, error } = await supabaseClient
-        .from('profiles')
-        .select('full_name, avatar_url')
-        .eq('id', recipientId)
-        .single();
-
-    if (error) {
-        console.error('Error loading recipient:', error);
-        return;
-    }
-
-    // Update header
-    messageHeader.innerHTML = `
-        <img class="h-10 w-10 rounded-full" src="${recipient.avatar_url || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(recipient.full_name)}" alt="${recipient.full_name}">
-        <div class="ml-3 flex-1">
-            <h3 class="text-lg font-medium text-gray-900">${recipient.full_name}</h3>
-            <p class="text-sm text-gray-500">Active now</p>
-        </div>
-    `;
-
-    // Load messages
-    await loadMessages(recipientId);
-    
-    // Show message input
-    messageInputContainer.classList.remove('hidden');
-}
-
-// Load messages
+// Load messages for regular conversations
 async function loadMessages(recipientId) {
     const { data: messages, error } = await supabaseClient
         .from('messages')
@@ -194,60 +340,80 @@ async function loadMessages(recipientId) {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
-// Send message
-async function sendMessage() {
-    const content = messageInput.value.trim();
-    if (!content || !currentRecipientId) return;
-
-    const { error } = await supabaseClient
+// Load conversations (updated to handle special recipients)
+async function loadConversations() {
+    // Get conversations where current user is either sender or recipient
+    const { data: conversations, error } = await supabaseClient
         .from('messages')
-        .insert({
-            sender_id: currentUserId,
-            recipient_id: currentRecipientId,
-            content: content
-        });
+        .select('sender_id, recipient_id, recipient_type, created_at, recipients:recipient_id(full_name, avatar_url), senders:sender_id(full_name, avatar_url)')
+        .or(`sender_id.eq.${currentUserId},recipient_id.eq.${currentUserId}`)
+        .order('created_at', { ascending: false });
 
     if (error) {
-        alert('Error sending message: ' + error.message);
+        conversationsList.innerHTML = '<div class="p-4 text-center text-red-500">Error loading conversations</div>';
+        console.error('Error loading conversations:', error);
         return;
     }
 
-    // Clear input and reload messages
-    messageInput.value = '';
-    await loadMessages(currentRecipientId);
-}
+    if (conversations.length === 0) {
+        conversationsList.innerHTML = '<div class="p-4 text-center text-gray-500">No conversations yet</div>';
+        return;
+    }
 
-// Send new message (from modal)
-async function sendNewMessage() {
-    const recipientId = recipientSelect.value;
-    const content = newMessageContent.value.trim();
+    // Process conversations to show unique recipients
+    const uniqueRecipients = {};
     
-    if (!recipientId || !content) {
-        alert('Please select a recipient and enter a message');
-        return;
-    }
+    conversations.forEach(conv => {
+        if (conv.recipient_type) {
+            // This is a special recipient (management/company)
+            const key = `special_${conv.recipient_type}`;
+            if (!uniqueRecipients[key]) {
+                uniqueRecipients[key] = {
+                    id: conv.recipient_type,
+                    type: 'special',
+                    name: conv.recipient_type.charAt(0).toUpperCase() + conv.recipient_type.slice(1),
+                    avatar: null,
+                    lastMessage: conv.created_at
+                };
+            }
+        } else {
+            // This is a regular user recipient
+            const otherUserId = conv.sender_id === currentUserId ? conv.recipient_id : conv.sender_id;
+            const otherUser = conv.sender_id === currentUserId ? conv.recipients : conv.senders;
+            
+            if (otherUser && !uniqueRecipients[otherUserId]) {
+                uniqueRecipients[otherUserId] = {
+                    id: otherUserId,
+                    type: 'user',
+                    name: otherUser.full_name,
+                    avatar: otherUser.avatar_url,
+                    lastMessage: conv.created_at
+                };
+            }
+        }
+    });
 
-    const { error } = await supabaseClient
-        .from('messages')
-        .insert({
-            sender_id: currentUserId,
-            recipient_id: recipientId,
-            content: content
+    // Sort by last message date
+    const sortedConversations = Object.values(uniqueRecipients).sort((a, b) => 
+        new Date(b.lastMessage) - new Date(a.lastMessage));
+
+    // Display conversations
+    conversationsList.innerHTML = sortedConversations.map(conv => `
+        <div class="p-4 hover:bg-gray-100 cursor-pointer transition flex items-center conversation-item" data-id="${conv.id}" data-type="${conv.type}">
+            <img class="h-10 w-10 rounded-full" src="${conv.avatar || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(conv.name)}" alt="${conv.name}">
+            <div class="ml-3 flex-1">
+                <h4 class="text-sm font-medium text-gray-900">${conv.name}</h4>
+                <p class="text-sm text-gray-500">Last conversation</p>
+            </div>
+        </div>
+    `).join('');
+
+    // Add click event to conversation items
+    document.querySelectorAll('.conversation-item').forEach(item => {
+        item.addEventListener('click', () => {
+            openConversation(item.dataset.id);
         });
-
-    if (error) {
-        alert('Error sending message: ' + error.message);
-        return;
-    }
-
-    // Close modal, clear fields, and reload conversations
-    newMessageModal.classList.add('hidden');
-    recipientSelect.value = '';
-    newMessageContent.value = '';
-    await loadConversations();
-    
-    // Open the new conversation
-    await openConversation(recipientId);
+    });
 }
 
 // Set up event listeners

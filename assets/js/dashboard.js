@@ -1,4 +1,4 @@
-// Initialize Supabase
+        // Initialize Supabase
         const supabaseUrl = 'https://heenvsshjcizlykpbcag.supabase.co';
         const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhlZW52c3NoamNpemx5a3BiY2FnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMwNDA0OTgsImV4cCI6MjA2ODYxNjQ5OH0.SZFhUuGhnqyRD91NdY265N5ojeS1wcMSwl9a2IOpNPQ';
         const supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
@@ -6,6 +6,13 @@
         // Global variables
         let currentUser = null;
         let notificationCount = 0;
+        let isSidebarCollapsed = false;
+        let userSettings = {
+            darkMode: false,
+            compactSidebar: false,
+            emailNotifications: true,
+            pushNotifications: true
+        };
 
         // DOM Elements
         const totalProductsEl = document.getElementById('totalProducts');
@@ -22,10 +29,11 @@
             await checkAuth();
             await fetchDashboardData();
             setupEventListeners();
+            loadSettings();
         });
 
         // Check authentication
-     /**   async function checkAuth() {
+        async function checkAuth() {
             try {
                 const { data: { user } } = await supabaseClient.auth.getUser();
                 if (!user) {
@@ -38,7 +46,7 @@
                 console.error('Auth error:', error);
                 window.location.href = 'index.html';
             }
-        } */
+        }
 
         // Update user interface with user data
         function updateUserInterface(user) {
@@ -57,6 +65,7 @@
             document.getElementById('sidebarUserName').textContent = displayName;
             document.getElementById('profileName').textContent = displayName;
             document.getElementById('profileEmail').textContent = user.email;
+            document.getElementById('fullName').value = user.user_metadata?.full_name || displayName;
             
             // Update profile details
             const createdDate = new Date(user.created_at).toLocaleDateString();
@@ -139,54 +148,69 @@
         }
 
         // Fetch expiring products
-        async function fetchExpiringProducts(userId) {
-            try {
-                const thirtyDaysFromNow = new Date();
-                thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
-                
-                const { data: products, error } = await supabaseClient
-                    .from('products')
-                    .select('id, name, expiry_date, quantity, category')
-                    .eq('user_id', userId)
-                    .gte('expiry_date', new Date().toISOString().split('T')[0])
-                    .lte('expiry_date', thirtyDaysFromNow.toISOString().split('T')[0])
-                    .order('expiry_date', { ascending: true })
-                    .limit(5);
+async function fetchExpiringProducts(userId) {
+    try {
+        const thirtyDaysFromNow = new Date();
+        thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
+        
+        // Get current date at midnight (00:00:00)
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        // Get 30 days from now at end of day (23:59:59)
+        thirtyDaysFromNow.setHours(23, 59, 59, 999);
+        
+        const { data: products, error } = await supabaseClient
+            .from('products')
+            .select(`
+                id, 
+                name, 
+                expiry_date, 
+                quantity, 
+                category_id,
+                categories (name)
+            `)
+            .eq('user_id', userId)
+            .gte('expiry_date', today.toISOString())
+            .lte('expiry_date', thirtyDaysFromNow.toISOString())
+            .order('expiry_date', { ascending: true })
+            .limit(5);
 
-                if (error) {
-                    expiringProductsList.innerHTML = '<div class="p-4 text-center text-red-500">Error loading products</div>';
-                    return;
-                }
-
-                if (!products || products.length === 0) {
-                    expiringProductsList.innerHTML = '<div class="p-4 text-center text-gray-500">No products expiring soon</div>';
-                    return;
-                }
-
-                expiringProductsList.innerHTML = products.map(product => `
-                    <div class="flex items-center justify-between p-4 hover:bg-gray-50 transition">
-                        <div class="flex items-center">
-                            <div class="p-2 rounded-full bg-amber-100 text-amber-600 mr-4">
-                                <i class="fas fa-exclamation-circle"></i>
-                            </div>
-                            <div>
-                                <h4 class="font-medium text-gray-900">${product.name}</h4>
-                                <p class="text-sm text-gray-500">${product.category || 'Uncategorized'}</p>
-                            </div>
-                        </div>
-                        <div class="text-right">
-                            <p class="font-medium ${getExpiryColor(product.expiry_date)}">
-                                ${getDaysUntilExpiry(product.expiry_date)} days left
-                            </p>
-                            <p class="text-sm text-gray-500">Qty: ${product.quantity || 1}</p>
-                        </div>
-                    </div>
-                `).join('');
-            } catch (error) {
-                console.error('Error fetching expiring products:', error);
-                expiringProductsList.innerHTML = '<div class="p-4 text-center text-red-500">Error loading products</div>';
-            }
+        if (error) {
+            console.error('Supabase error:', error);
+            expiringProductsList.innerHTML = '<div class="p-4 text-center text-red-500">Error loading products</div>';
+            return;
         }
+
+        if (!products || products.length === 0) {
+            expiringProductsList.innerHTML = '<div class="p-4 text-center text-gray-500">No products expiring soon</div>';
+            return;
+        }
+
+        expiringProductsList.innerHTML = products.map(product => `
+            <div class="flex items-center justify-between p-4 hover:bg-gray-50 transition">
+                <div class="flex items-center">
+                    <div class="p-2 rounded-full bg-amber-100 text-amber-600 mr-4">
+                        <i class="fas fa-exclamation-circle"></i>
+                    </div>
+                    <div>
+                        <h4 class="font-medium text-gray-900">${product.name}</h4>
+                        <p class="text-sm text-gray-500">${product.categories?.name || 'Uncategorized'}</p>
+                    </div>
+                </div>
+                <div class="text-right">
+                    <p class="font-medium ${getExpiryColor(product.expiry_date)}">
+                        ${getDaysUntilExpiry(product.expiry_date)} days left
+                    </p>
+                    <p class="text-sm text-gray-500">Qty: ${product.quantity || 1}</p>
+                </div>
+            </div>
+        `).join('');
+    } catch (error) {
+        console.error('Error fetching expiring products:', error);
+        expiringProductsList.innerHTML = '<div class="p-4 text-center text-red-500">Error loading products</div>';
+    }
+}
 
         // Fetch notifications
         async function fetchNotifications(userId) {
@@ -283,6 +307,9 @@
             document.getElementById('closeMobileMenu').addEventListener('click', closeMobileMenu);
             document.getElementById('mobileOverlay').addEventListener('click', closeMobileMenu);
 
+            // Toggle sidebar
+            document.getElementById('toggleSidebar').addEventListener('click', toggleSidebar);
+
             // User menu
             document.getElementById('userMenuBtn').addEventListener('click', toggleUserMenu);
             document.addEventListener('click', function(e) {
@@ -300,13 +327,81 @@
 
         // Mobile menu functions
         function openMobileMenu() {
-            document.getElementById('mobileSidebar').classList.add('open');
+            document.getElementById('sidebar').classList.add('open');
             document.getElementById('mobileOverlay').classList.remove('hidden');
         }
 
         function closeMobileMenu() {
-            document.getElementById('mobileSidebar').classList.remove('open');
+            document.getElementById('sidebar').classList.remove('open');
             document.getElementById('mobileOverlay').classList.add('hidden');
+        }
+
+        // Toggle sidebar
+        function toggleSidebar() {
+            isSidebarCollapsed = !isSidebarCollapsed;
+            const sidebar = document.getElementById('sidebar');
+            
+            if (isSidebarCollapsed) {
+                sidebar.classList.add('sidebar-collapsed');
+                localStorage.setItem('sidebarCollapsed', 'true');
+            } else {
+                sidebar.classList.remove('sidebar-collapsed');
+                localStorage.setItem('sidebarCollapsed', 'false');
+            }
+        }
+
+        // Load settings from localStorage
+        function loadSettings() {
+            const savedSettings = localStorage.getItem('userSettings');
+            if (savedSettings) {
+                userSettings = JSON.parse(savedSettings);
+            }
+            
+            const sidebarCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
+            if (sidebarCollapsed) {
+                document.getElementById('sidebar').classList.add('sidebar-collapsed');
+                isSidebarCollapsed = true;
+            }
+            
+            // Update toggle switches
+            document.getElementById('darkModeToggle').checked = userSettings.darkMode;
+            document.getElementById('compactSidebarToggle').checked = userSettings.compactSidebar;
+            document.getElementById('emailNotificationsToggle').checked = userSettings.emailNotifications;
+            document.getElementById('pushNotificationsToggle').checked = userSettings.pushNotifications;
+            
+            // Apply dark mode if enabled
+            if (userSettings.darkMode) {
+                document.documentElement.classList.add('dark');
+            }
+        }
+
+        // Save settings to localStorage
+        function saveSettings() {
+            userSettings = {
+                darkMode: document.getElementById('darkModeToggle').checked,
+                compactSidebar: document.getElementById('compactSidebarToggle').checked,
+                emailNotifications: document.getElementById('emailNotificationsToggle').checked,
+                pushNotifications: document.getElementById('pushNotificationsToggle').checked
+            };
+            
+            localStorage.setItem('userSettings', JSON.stringify(userSettings));
+            
+            // Apply dark mode if changed
+            if (userSettings.darkMode) {
+                document.documentElement.classList.add('dark');
+            } else {
+                document.documentElement.classList.remove('dark');
+            }
+            
+            // Apply compact sidebar if changed
+            if (userSettings.compactSidebar && !isSidebarCollapsed) {
+                toggleSidebar();
+            } else if (!userSettings.compactSidebar && isSidebarCollapsed) {
+                toggleSidebar();
+            }
+            
+            showToast('Settings saved successfully', 'success');
+            closeSettingsModal();
         }
 
         // User menu functions
@@ -324,13 +419,73 @@
             document.getElementById('addProductModal').classList.add('hidden');
         }
 
-        function showProfile() {
+        function showProfile(editMode = false) {
             document.getElementById('profileModal').classList.remove('hidden');
             document.getElementById('userDropdown').classList.add('hidden');
+            
+            if (editMode) {
+                document.getElementById('fullName').focus();
+            }
         }
 
         function closeProfileModal() {
             document.getElementById('profileModal').classList.add('hidden');
+        }
+
+        function showSettings() {
+            document.getElementById('settingsModal').classList.remove('hidden');
+            document.getElementById('userDropdown').classList.add('hidden');
+        }
+
+        function closeSettingsModal() {
+            document.getElementById('settingsModal').classList.add('hidden');
+        }
+
+        // Handle avatar upload
+        async function handleAvatarUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            try {
+                // In a real app, you would upload to Supabase Storage
+                // For demo, we'll just create a local URL
+                const avatarUrl = URL.createObjectURL(file);
+                
+                // Update all avatar images
+                document.getElementById('sidebarUserAvatar').src = avatarUrl;
+                document.getElementById('headerUserAvatar').src = avatarUrl;
+                document.getElementById('profileAvatar').src = avatarUrl;
+                
+                showToast('Avatar updated successfully', 'success');
+            } catch (error) {
+                console.error('Error uploading avatar:', error);
+                showToast('Error updating avatar', 'error');
+            }
+        }
+
+        // Update user profile
+        async function updateProfile() {
+            const fullName = document.getElementById('fullName').value.trim();
+            if (!fullName) {
+                showToast('Please enter a valid name', 'error');
+                return;
+            }
+            
+            try {
+                const { data, error } = await supabaseClient.auth.updateUser({
+                    data: { full_name: fullName }
+                });
+                
+                if (error) throw error;
+                
+                currentUser = data.user;
+                updateUserInterface(currentUser);
+                showToast('Profile updated successfully', 'success');
+                closeProfileModal();
+            } catch (error) {
+                console.error('Error updating profile:', error);
+                showToast('Error updating profile', 'error');
+            }
         }
 
         // Navigation functions
@@ -345,19 +500,23 @@
         function navigateToReports() {
             showToast('Redirecting to Reports page...', 'info');
             // window.location.href = 'reports.html';
+             setTimeout(() => {
+                window.location.href = 'reports.html';
+            }, 800);
         }
 
         function navigateToChat() {
             showToast('Redirecting to Management Chat...', 'info');
             // window.location.href = 'chat.html';
-        }
-
-        function showSettings() {
-            showToast('Settings feature coming soon...', 'info');
+             setTimeout(() => {
+                window.location.href = 'chat.html';
+            }, 800);
         }
 
         function showAllNotifications() {
             showToast('All notifications view coming soon...', 'info');
+
+            
         }
 
         // Logout function
